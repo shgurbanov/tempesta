@@ -519,7 +519,7 @@ tfw_tls_encrypt(struct sock *sk, struct sk_buff *skb, unsigned int limit)
 	    (io->alert[1] == TTLS_ALERT_MSG_CLOSE_NOTIFY ||
 	     io->alert[0] == TTLS_ALERT_LEVEL_FATAL))
 	{
-		ss_close(sk, SS_F_SYNC);
+		ss_close_force(sk);
 	}
 
 out:

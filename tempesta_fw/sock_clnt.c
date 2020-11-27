@@ -254,8 +254,10 @@ tfw_sock_clnt_drop(struct sock *sk)
 	 * handshakes. Can't be done on frang_conn_close() since connection is
 	 * unlinked from socket on that time and can be already destroyed.
 	 */
-	if (TFW_CONN_TLS(conn))
+	if (TFW_CONN_TLS(conn)) {
 		tfw_tls_connection_lost(conn);
+		sk->sk_write_xmit = NULL;
+	}
 
 	/*
 	 * Withdraw from socket activity. Connection is now closed,
