@@ -1353,7 +1353,7 @@ ttls_send_alert(TlsCtx *tls, unsigned char lvl, unsigned char msg)
 		close = true;
 
 	if ((r = ttls_write_record(tls, NULL, close)))
-		T_WARN("Cannot sent TLS alert %d:%d\n", msg, lvl);
+		T_WARN("Cannot send a TLS alert %d:%d\n", msg, lvl);
 
 	return r;
 }
