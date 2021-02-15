@@ -521,7 +521,7 @@ EXPORT_SYMBOL(ss_send);
  * Called with locked socket.
  */
 static void
-ss_do_close(struct sock *sk)
+ss_do_close(struct sock *sk, bool not_push_frames)
 {
 	struct sk_buff *skb;
 	int data_was_unread = 0;
@@ -588,7 +588,9 @@ ss_do_close(struct sock *sk)
 				tcp_queue_skb(sk, skb);
 			}
 		}
-		__tcp_push_pending_frames(sk, mss_now, TCP_NAGLE_OFF);
+
+		if (!not_push_frames)
+			__tcp_push_pending_frames(sk, mss_now, TCP_NAGLE_OFF);
 	}
 
 adjudge_to_death:
@@ -638,99 +640,7 @@ adjudge_to_death:
 void
 ss_close_force(struct sock *sk)
 {
-	struct sk_buff *skb;
-	int data_was_unread = 0;
-
-	if (unlikely(!sk))
-		return;
-	T_DBG2("[%d]: Close socket %p (%s): account=%d refcnt=%u\n",
-	       smp_processor_id(), sk, ss_statename[sk->sk_state],
-	       sk_has_account(sk), refcount_read(&sk->sk_refcnt));
-	assert_spin_locked(&sk->sk_lock.slock);
-	TFW_VALIDATE_SK_LOCK_OWNER(sk);
-	WARN_ON_ONCE(sk->sk_state == TCP_LISTEN);
-	/* We must return immediately, so LINGER option is meaningless. */
-	WARN_ON_ONCE(sock_flag(sk, SOCK_LINGER));
-	/* We don't support virtual containers, so TCP_REPAIR is prohibited. */
-	WARN_ON_ONCE(tcp_sk(sk)->repair);
-	/* The socket must have atomic allocation mask. */
-	WARN_ON_ONCE(!(sk->sk_allocation & GFP_ATOMIC));
-
-	/* The below is mostly copy-paste from tcp_close(). */
-	sk->sk_shutdown = SHUTDOWN_MASK;
-
-	while ((skb = __skb_dequeue(&sk->sk_receive_queue)) != NULL) {
-		u32 len = TCP_SKB_CB(skb)->end_seq - TCP_SKB_CB(skb)->seq -
-			  tcp_hdr(skb)->fin;
-		data_was_unread += len;
-		T_DBG3("[%d]: free rcv skb %p\n", smp_processor_id(), skb);
-		__kfree_skb(skb);
-	}
-
-	sk_mem_reclaim(sk);
-
-	if (sk->sk_state == TCP_CLOSE)
-		goto adjudge_to_death;
-
-	if (data_was_unread) {
-		NET_INC_STATS(sock_net(sk), LINUX_MIB_TCPABORTONCLOSE);
-		tcp_set_state(sk, TCP_CLOSE);
-		tcp_send_active_reset(sk, sk->sk_allocation);
-	}
-	else if (tcp_close_state(sk)) {
-		/* The code below is taken from tcp_send_fin(). */
-		struct tcp_sock *tp = tcp_sk(sk);
-
-		skb = tcp_write_queue_tail(sk);
-		BUG_ON(!sk);
-
-		/*
-		 * Send a FIN with the data because ss_close_force() is called when
-		 * there is data to send.
-		 */
-		TCP_SKB_CB(skb)->tcp_flags |= TCPHDR_FIN;
-		TCP_SKB_CB(skb)->end_seq++;
-		tp->write_seq++;
-	}
-
-adjudge_to_death:
-	sock_hold(sk);
-	sock_orphan(sk);
-
-	/*
-	 * SS sockets are processed in softirq only,
-	 * so backlog queue should be empty.
-	 */
-	WARN_ON(sk->sk_backlog.tail);
-
-	percpu_counter_inc(sk->sk_prot->orphan_count);
-
-	if (sk->sk_state == TCP_FIN_WAIT2) {
-		const int tmo = tcp_fin_time(sk);
-		if (tmo > TCP_TIMEWAIT_LEN) {
-			inet_csk_reset_keepalive_timer(sk,
-						tmo - TCP_TIMEWAIT_LEN);
-		} else {
-			tcp_time_wait(sk, TCP_FIN_WAIT2, tmo);
-			return;
-		}
-	}
-	if (sk->sk_state != TCP_CLOSE) {
-		sk_mem_reclaim(sk);
-		if (tcp_check_oom(sk, 0)) {
-			tcp_set_state(sk, TCP_CLOSE);
-			tcp_send_active_reset(sk, GFP_ATOMIC);
-			__NET_INC_STATS(sock_net(sk),
-					LINUX_MIB_TCPABORTONMEMORY);
-		}
-	}
-	if (sk->sk_state == TCP_CLOSE) {
-		struct request_sock *req = tcp_sk(sk)->fastopen_rsk;
-		if (req != NULL)
-			reqsk_fastopen_remove(sk, req, false);
-		inet_csk_destroy_sock(sk);
-	}
-
+	ss_do_close(sk, true);
 	SS_CALL_GUARD_EXIT(connection_drop, sk);
 	sock_put(sk); /* paired with ss_do_close() */
 }
@@ -748,7 +658,7 @@ EXPORT_SYMBOL(ss_close_force);
 static void
 ss_linkerror(struct sock *sk)
 {
-	ss_do_close(sk);
+	ss_do_close(sk, false);
 	SS_CALL_GUARD_EXIT(connection_drop, sk);
 	sock_put(sk);	/* paired with ss_do_close() */
 }
@@ -1042,7 +952,7 @@ ss_tcp_state_change(struct sock *sk)
 		 * it on our own without calling upper layer hooks.
 		 */
 		if (ss_active_guard_enter(SS_V_ACT_NEWCONN)) {
-			ss_do_close(sk);
+			ss_do_close(sk, false);
 			sock_put(sk);
 			/*
 			 * The case of a connect to an upstream server that
@@ -1055,7 +965,7 @@ ss_tcp_state_change(struct sock *sk)
 		}
 
 		if (lsk && ss_active_guard_enter(SS_V_ACT_LIVECONN)) {
-			ss_do_close(sk);
+			ss_do_close(sk, false);
 			sock_put(sk);
 			ss_active_guard_exit(SS_V_ACT_NEWCONN);
 			return;
@@ -1448,7 +1358,7 @@ EXPORT_SYMBOL(ss_getpeername);
 
 #define __sk_close_locked(sk)					\
 do {								\
-	ss_do_close(sk);					\
+	ss_do_close(sk, false);					\
 	bh_unlock_sock(sk);					\
 	SS_CALL_GUARD_EXIT(connection_drop, sk);		\
 	sock_put(sk); /* paired with ss_do_close() */		\
