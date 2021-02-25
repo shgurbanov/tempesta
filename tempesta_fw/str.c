@@ -557,8 +557,6 @@ void tfw_str_collect_cmp(TfwStr *chunk, TfwStr *end, TfwStr *out,
  * @flag - 0 or TFW_STR_DUPLICATE. 0 - grow as compound string,
  * TFW_STR_DUPLICATE - grow as duplicate string
  * @return pointer to the first of newly added chunk.
- *
- * TODO do we need exponential growing?
  */
 static TfwStr *
 __str_grow_tree(TfwPool *pool, TfwStr *str, unsigned int flag, int n)
